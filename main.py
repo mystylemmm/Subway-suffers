@@ -1,927 +1,867 @@
 import os
 import json
 import random
-import io
+import math
 import wave
 import struct
-import math
-from datetime import date
+from datetime import date, timedelta
 
 from kivy.app import App
 from kivy.clock import Clock
+from kivy.core.window import Window
 from kivy.core.audio import SoundLoader
+from kivy.metrics import dp
 from kivy.uix.widget import Widget
 from kivy.uix.label import Label
 from kivy.uix.button import Button
-from kivy.graphics import Color, RoundedRectangle, Ellipse, Line
+from kivy.uix.boxlayout import BoxLayout
+from kivy.uix.floatlayout import FloatLayout
+from kivy.uix.scrollview import ScrollView
+from kivy.graphics import Color, Rectangle, RoundedRectangle, Ellipse, Line
 
+GAME_NAME = "CYBER DASH LEGENDS"
+SAVE_FILE = "cyber_dash_legends_save.json"
+SAVE_PATH = SAVE_FILE
+PLAYER_Y = 0.17
+BOSS_MAX = 120
+ROAD_L, ROAD_W = .12, .76
 
 CHARACTERS = [
-    {"id": 0, "name": "Cyber Blue", "cost": 0,
-     "color": (0, 1, 0.8, 1), "visor": (0.1, 0.1, 0.2, 1)},
-    {"id": 1, "name": "Neon Ninja", "cost": 15,
-     "color": (0.8, 0.1, 1, 1), "visor": (1, 1, 0, 1)},
-    {"id": 2, "name": "Gold Sprinter", "cost": 30,
-     "color": (1, 0.8, 0, 1), "visor": (0, 0, 0, 1)},
-    {"id": 3, "name": "Mecha Red", "cost": 50,
-     "color": (1, 0.2, 0.1, 1), "visor": (1, 1, 1, 1)}
+    {"name": "Cyber Kid", "price": 0, "color": (0.1, .9, 1, 1)},
+    {"name": "Neon Ninja", "price": 150, "color": (.8, .2, 1, 1)},
+    {"name": "Golden Bot", "price": 350, "color": (1, .75, .1, 1)},
+    {"name": "Shadow", "price": 600, "color": (.65, .7, .85, 1)},
+    {"name": "Toxic", "price": 900, "color": (.2, 1, .35, 1)},
+    {"name": "Fireball", "price": 1400, "color": (1, .25, .1, 1)},
+    {"name": "Valkyrie", "price": 2000, "color": (1, .9, .3, 1)},
+    {"name": "Glitch", "price": 2800, "color": (.9, .1, .9, 1)},
+    {"name": "Quantum", "price": 3800, "color": (.1, 1, .9, 1)},
+    {"name": "Apex Legend", "price": 5000, "color": (1, 1, 1, 1)},
 ]
 
+POWERUPS = {
+    "shield": {"name": "Energy Shield", "price": 100, "duration": 8},
+    "magnet": {"name": "Coin Magnet", "price": 150, "duration": 10},
+    "boost": {"name": "Score Boost", "price": 200, "duration": 8},
+    "laser": {"name": "Lane Laser", "price": 250, "duration": 6},
+    "slow": {"name": "Time Dilation", "price": 300, "duration": 7},
+}
+POWER_KEYS = list(POWERUPS.keys())
 
-class RunnerGame(Widget):
-    def __init__(self, **kwargs):
-        super().__init__(**kwargs)
+WORLDS = [
+    {"name": "NEON CITY", "sky": (.01, .02, .09, 1), "road": (.03, .04, .11, 1), "glow": (0, .9, 1, 1)},
+    {"name": "LAVA ZONE", "sky": (.16, .025, .01, 1), "road": (.12, .035, .015, 1), "glow": (1, .25, .02, 1)},
+    {"name": "FROZEN PLANET", "sky": (.015, .07, .16, 1), "road": (.025, .09, .16, 1), "glow": (.3, .9, 1, 1)},
+]
 
-        self.load_game_data()
-        self.state = "menu"
+def lane_nx(lane):
+    return ROAD_L + ROAD_W * (lane + .5) / 3
 
-        self.score = 0
-        self.session_coins = 0
-        self.player_lane = 1
-        self.player_action = "run"
-        self.action_timer = 0.0
+def default_save():
+    return {
+        "coins": 500, "total_coins": 500, "best_score": 0,
+        "games_played": 0, "levels_completed": 0,
+        "selected_character": 0, "unlocked": [0],
+        "powerups": {k: 1 for k in POWERUPS},
+        "sound": True, "daily_date": "", "daily_streak": 0,
+        "missions_claimed": [], "bosses_defeated": 0,
+        "total_combos": 0, "best_combo": 0, "coin_pickups": 0,
+    }
 
-        self.lives = 3
-        self.max_lives = 3
-
-        self.magnet_active = False
-        self.magnet_timer = 0.0
-        self.jetpack_active = False
-        self.jetpack_timer = 0.0
-        self.shield_active = False
-        self.shield_timer = 0.0
-        self.speed_boost_active = False
-        self.speed_boost_timer = 0.0
-
-        self.obstacles = []
-        self.coins = []
-        self.powerups = []
-        self.particles = []
-        self.bg_offset = 0.0
-        self.spawn_elapsed = 0.0
-        self.touch_start_x = 0
-        self.touch_start_y = 0
-
-        self.ui_elements = []
-        self.score_label = None
-        self.music_enabled = True
-        self.sound_enabled = True
-
-        self.coin_sound = self.generate_tone_sound(950, 0.08)
-        self.click_sound = self.generate_tone_sound(600, 0.05)
-        self.hit_sound = self.generate_tone_sound(150, 0.18)
-        self.bgm_sound = self.generate_bgm_loop()
-
-        if self.bgm_sound:
-            self.bgm_sound.loop = True
-            self.bgm_sound.volume = 0.25
-            self.bgm_sound.play()
-
-        self.bind(size=self._update_layout, pos=self._update_layout)
-        Clock.schedule_interval(self.update_game, 1 / 60.0)
-        Clock.schedule_interval(self.spawn_entities, 0.85)
-
-        self.show_menu()
-
-    # ---------------- SAVE DATA ----------------
-
-    def get_save_path(self):
+def load_save():
+    data = default_save()
+    try:
+        if os.path.exists(SAVE_PATH):
+            with open(SAVE_PATH, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                data.update(loaded)
+    except Exception:
+        pass
+    if not isinstance(data["unlocked"], list) or 0 not in data["unlocked"]:
+        data["unlocked"] = [0]
+    if not isinstance(data["missions_claimed"], list):
+        data["missions_claimed"] = []
+    if not isinstance(data["powerups"], dict):
+        data["powerups"] = {}
+    for key in POWERUPS:
         try:
-            return os.path.join(
-                App.get_running_app().user_data_dir, "save_data.json"
-            )
+            data["powerups"][key] = max(0, int(data["powerups"].get(key, 0)))
+        except (TypeError, ValueError, OverflowError):
+            data["powerups"][key] = 0
+    integer_fields = ("coins", "total_coins", "best_score", "games_played", "levels_completed", "daily_streak", "bosses_defeated", "total_combos", "best_combo", "coin_pickups")
+    for key in integer_fields:
+        try:
+            value = int(data.get(key, 0))
+            data[key] = max(0, value)
+        except (TypeError, ValueError, OverflowError):
+            data[key] = 0
+    try:
+        selected = int(data.get("selected_character", 0))
+    except (TypeError, ValueError, OverflowError):
+        selected = 0
+    data["selected_character"] = selected if 0 <= selected < len(CHARACTERS) else 0
+    valid_unlocked = []
+    for item in data["unlocked"]:
+        try:
+            index = int(item)
+            if 0 <= index < len(CHARACTERS) and index not in valid_unlocked:
+                valid_unlocked.append(index)
+        except (TypeError, ValueError, OverflowError):
+            continue
+    if 0 not in valid_unlocked:
+        valid_unlocked.insert(0, 0)
+    data["unlocked"] = valid_unlocked
+    if data["selected_character"] not in data["unlocked"]:
+        data["selected_character"] = 0
+    data["sound"] = bool(data.get("sound", True))
+    if not isinstance(data.get("daily_date"), str):
+        data["daily_date"] = ""
+    return data
+
+def save_data(data):
+    try:
+        temp = SAVE_PATH + ".tmp"
+        with open(temp, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=4)
+        os.replace(temp, SAVE_PATH)
+    except Exception as e:
+        try:
+            if os.path.exists(temp):
+                os.remove(temp)
         except Exception:
-            return "save_data.json"
-
-    def load_game_data(self):
-        defaults = {
-            "total_coins": 0,
-            "high_score": 0,
-            "unlocked_chars": [0],
-            "selected_char": 0,
-            "magnet_level": 1,
-            "jetpack_level": 1,
-            "games_played": 0,
-            "last_daily_reward": ""
-        }
-        path = self.get_save_path()
-        data = {}
-        try:
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as file:
-                    data = json.load(file)
-        except (OSError, ValueError, TypeError):
-            data = {}
-
-        for key, value in defaults.items():
-            setattr(self, key, data.get(key, value))
-
-        # Protect against corrupted or edited save data.
-        self.unlocked_chars = [
-            int(cid) for cid in self.unlocked_chars
-            if isinstance(cid, (int, float)) and 0 <= int(cid) < len(CHARACTERS)
-        ]
-        if 0 not in self.unlocked_chars:
-            self.unlocked_chars.insert(0, 0)
-        if self.selected_char not in self.unlocked_chars:
-            self.selected_char = 0
-        self.magnet_level = max(1, min(5, int(self.magnet_level)))
-        self.jetpack_level = max(1, min(5, int(self.jetpack_level)))
-
-    def save_game_data(self):
-        path = self.get_save_path()
-        data = {
-            "total_coins": self.total_coins,
-            "high_score": self.high_score,
-            "unlocked_chars": self.unlocked_chars,
-            "selected_char": self.selected_char,
-            "magnet_level": self.magnet_level,
-            "jetpack_level": self.jetpack_level,
-            "games_played": self.games_played,
-            "last_daily_reward": self.last_daily_reward
-        }
-        try:
-            folder = os.path.dirname(path)
-            if folder:
-                os.makedirs(folder, exist_ok=True)
-            temp_path = path + ".tmp"
-            with open(temp_path, "w", encoding="utf-8") as file:
-                json.dump(data, file)
-            os.replace(temp_path, path)
-        except OSError:
             pass
+        print("Save error:", e)
 
-    # ---------------- AUDIO ----------------
+def make_label(text, size=18, color=(1, 1, 1, 1), bold=False):
+    return Label(text=text, font_size=dp(size), color=color, bold=bold, halign="center", valign="middle")
 
-    def generate_tone_sound(self, frequency=440, duration=0.12):
+def make_button(text, callback, color=(.05, .55, .85, 1), height=dp(52)):
+    btn = Button(text=text, size_hint_y=None, height=height, font_size=dp(16), bold=True, background_normal="", background_down="", background_color=color, color=(1, 1, 1, 1))
+    btn.bind(on_release=lambda *_: callback())
+    return btn
+
+class GameField(Widget):
+    def __init__(self, game, **kwargs):
+        super().__init__(**kwargs)
+        self.game = game
+        self.bind(pos=self.redraw, size=self.redraw)
+    def lane_x(self, lane):
+        return self.x + self.width * lane_nx(lane)
+    def redraw(self, *_):
+        self.canvas.clear()
+        if self.width <= 0 or self.height <= 0:
+            return
+        g = self.game
+        w, h = self.width, self.height
+        ox, oy = self.x, self.y
+        world = WORLDS[g.world_index]
+        with self.canvas:
+            Color(*world["sky"])
+            Rectangle(pos=self.pos, size=self.size)
+            Color(*world["road"])
+            Rectangle(pos=(ox + w * ROAD_L, oy), size=(w * ROAD_W, h))
+            Color(*world["glow"])
+            for edge in (ROAD_L, ROAD_L + ROAD_W):
+                Line(points=[ox + w * edge, oy, ox + w * edge, oy + h], width=dp(2))
+            Color(.2, .55, .8, .55)
+            for i in (1, 2):
+                x = ox + w * (ROAD_L + ROAD_W * i / 3)
+                Line(points=[x, oy, x, oy + h], dash_length=dp(14), dash_offset=dp(10), width=dp(1))
+            Color(*world["glow"][:3], .22)
+            for i in range(14):
+                yy = oy + ((i * .1 - g.road_offset) % 1) * h
+                Line(points=[ox + w * (ROAD_L + .02), yy, ox + w * (ROAD_L + ROAD_W - .02), yy], width=dp(1))
+            for p in g.particles:
+                Color(p["color"][0], p["color"][1], p["color"][2], max(0, p["alpha"]))
+                s = dp(p["size"])
+                Ellipse(pos=(ox + p["x"] * w - s, oy + p["y"] * h - s), size=(s * 2, s * 2))
+            for item in g.items:
+                cx = self.lane_x(item["lane"])
+                cy = oy + item["y"] * h
+                t = item["type"]
+                if t == "coin":
+                    Color(1, .82, .05, 1)
+                    Ellipse(pos=(cx - dp(12), cy - dp(12)), size=(dp(24), dp(24)))
+                    Color(1, 1, .8, 1)
+                    Ellipse(pos=(cx - dp(5), cy - dp(5)), size=(dp(10), dp(10)))
+                elif t == "power":
+                    Color(.1, 1, .75, 1)
+                    RoundedRectangle(pos=(cx - dp(14), cy - dp(14)), size=(dp(28), dp(28)), radius=[dp(6)])
+                    Color(1, 1, 1, 1)
+                    Line(rectangle=(cx - dp(14), cy - dp(14), dp(28), dp(28)), width=dp(1.5))
+                elif t == "obstacle":
+                    Color(1, .12, .18, 1)
+                    RoundedRectangle(pos=(cx - dp(20), cy - dp(20)), size=(dp(40), dp(40)), radius=[dp(7)])
+                    Color(1, .65, .1, 1)
+                    Line(rectangle=(cx - dp(20), cy - dp(20), dp(40), dp(40)), width=dp(2))
+                elif t == "boss_projectile":
+                    Color(1, .1, .9, 1)
+                    Ellipse(pos=(cx - dp(15), cy - dp(15)), size=(dp(30), dp(30)))
+                    Color(1, .8, 1, 1)
+                    Ellipse(pos=(cx - dp(6), cy - dp(6)), size=(dp(12), dp(12)))
+            if g.boss_active:
+                bx, by = ox + w * .5, oy + h * .82
+                Color(.8, .04, .12, 1)
+                RoundedRectangle(pos=(bx - dp(55), by - dp(28)), size=(dp(110), dp(56)), radius=[dp(12)])
+                Color(1, .9, .1, 1)
+                Ellipse(pos=(bx - dp(26), by - dp(7)), size=(dp(13), dp(13)))
+                Ellipse(pos=(bx + dp(13), by - dp(7)), size=(dp(13), dp(13)))
+                Color(.2, .02, .02, 1)
+                Rectangle(pos=(ox + w * .2, oy + h * .91), size=(w * .6, dp(12)))
+                Color(1, .08, .12, 1)
+                Rectangle(pos=(ox + w * .2, oy + h * .91), size=(w * .6 * max(0, g.boss_health / BOSS_MAX), dp(12)))
+            px, py = self.lane_x(g.player_lane), oy + PLAYER_Y * h
+            char = CHARACTERS[g.data["selected_character"]]
+            Color(*char["color"][:3], .25)
+            Ellipse(pos=(px - dp(29), py - dp(29)), size=(dp(58), dp(58)))
+            Color(*char["color"])
+            RoundedRectangle(pos=(px - dp(18), py - dp(22)), size=(dp(36), dp(46)), radius=[dp(10)])
+            Color(.02, .04, .1, 1)
+            Ellipse(pos=(px - dp(10), py + dp(4)), size=(dp(6), dp(6)))
+            Ellipse(pos=(px + dp(4), py + dp(4)), size=(dp(6), dp(6)))
+            if g.power_timer["shield"] > 0:
+                Color(.1, .8, 1, .7)
+                Line(circle=(px, py, dp(33)), width=dp(3))
+            if g.power_timer["magnet"] > 0:
+                Color(.2, 1, .7, .5)
+                Line(circle=(px, py, dp(43)), width=dp(2))
+            if g.power_timer["laser"] > 0:
+                Color(1, .1, .1, .8)
+                Line(points=[px, py, px, oy + h], width=dp(4))
+
+class GameScreen(FloatLayout):
+    def __init__(self, app, **kwargs):
+        super().__init__(**kwargs)
+        self.app = app
+        self.data = app.data
+        self.running = False
+        self.paused = False
+        self.player_lane = 1
+        self.score = 0.0
+        self.run_coins = 0
+        self.speed = .38
+        self.spawn_timer = .7
+        self.road_offset = 0
+        self.level = 1
+        self.combo = 0
+        self.best_run_combo = 0
+        self.combo_timer = 0
+        self.world_index = 0
+        self.boss_active = False
+        self.boss_health = BOSS_MAX
+        self.boss_timer = 0
+        self.items = []
+        self.particles = []
+        self.power_timer = {k: 0 for k in POWERUPS}
+        self.sel_power = 0
+        self.save_timer = 0
+        self.last_touch = None
+        self._event = None
+        self._banner_event = None
+        self.field = GameField(self, size_hint=(1, 1))
+        self.add_widget(self.field)
+        self.hud = BoxLayout(orientation="horizontal", size_hint=(1, None), height=dp(54), pos_hint={"top": 1}, padding=dp(5), spacing=dp(3))
+        self.score_label = make_label("SCORE: 0", 13, (.2, .95, 1, 1), True)
+        self.coin_label = make_label("COINS: 0", 13, (1, .85, .1, 1), True)
+        self.level_label = make_label("LVL: 1", 13, (.8, .3, 1, 1), True)
+        pause_btn = make_button("||", self.pause_game, (.8, .12, .2, 1), dp(48))
+        pause_btn.size_hint_x = None
+        pause_btn.width = dp(48)
+        for wdg in (self.score_label, self.coin_label, self.level_label, pause_btn):
+            self.hud.add_widget(wdg)
+        self.add_widget(self.hud)
+        self.status = make_label("", 12, (.6, 1, .9, 1), True)
+        self.status.size_hint = (1, None)
+        self.status.height = dp(24)
+        self.status.pos_hint = {"center_x": .5, "top": .93}
+        self.add_widget(self.status)
+        self.banner = make_label("", 22, (1, 1, 1, 1), True)
+        self.banner.size_hint = (1, None)
+        self.banner.height = dp(55)
+        self.banner.pos_hint = {"center_x": .5, "center_y": .65}
+        self.add_widget(self.banner)
+        controls = BoxLayout(size_hint=(.96, None), height=dp(58), pos_hint={"center_x": .5, "y": .015}, spacing=dp(8))
+        self.use_btn = make_button("USE", self.use_powerup, (.05, .55, .3, .95))
+        self.use_btn.size_hint_y = 1
+        cycle_btn = make_button("NEXT", self.cycle_power, (.3, .3, .55, .95))
+        cycle_btn.size_hint_x = .55
+        controls.add_widget(make_button("< LEFT", self.move_left, (.05, .3, .7, .9)))
+        controls.add_widget(self.use_btn)
+        controls.add_widget(cycle_btn)
+        controls.add_widget(make_button("RIGHT >", self.move_right, (.05, .3, .7, .9)))
+        self.add_widget(controls)
+        self.start_game()
+    def start_game(self):
+        if self._event is not None:
+            self._event.cancel()
+        self.running = True
+        self.paused = False
+        self.player_lane = 1
+        self.score = 0.0
+        self.run_coins = 0
+        self.speed = .38
+        self.spawn_timer = .7
+        self.level = 1
+        self.combo = 0
+        self.best_run_combo = 0
+        self.combo_timer = 0
+        self.world_index = 0
+        self.boss_active = False
+        self.boss_health = BOSS_MAX
+        self.items = []
+        self.particles = []
+        self.power_timer = {k: 0 for k in POWERUPS}
+        self.banner.text = ""
+        self.update_hud()
+        self.app.play_sound("bgm")
+        self._event = Clock.schedule_interval(self.update, 1 / 60)
+    def stop_loop(self):
+        self.running = False
+        if self._event is not None:
+            self._event.cancel()
+            self._event = None
+        if self._banner_event is not None:
+            self._banner_event.cancel()
+            self._banner_event = None
+    def show_banner(self, text, seconds=1.8):
+        if self._banner_event is not None:
+            self._banner_event.cancel()
+        self.banner.text = text
+        self._banner_event = Clock.schedule_once(lambda *_: setattr(self.banner, "text", ""), seconds)
+    def update_hud(self):
+        self.score_label.text = f"SCORE: {int(self.score)}"
+        self.coin_label.text = f"COINS: {self.run_coins}"
+        self.level_label.text = f"LVL: {self.level}"
+        key = POWER_KEYS[self.sel_power]
+        owned = self.data["powerups"].get(key, 0)
+        self.use_btn.text = f"USE {POWERUPS[key]['name'].split()[-1].upper()} x{owned}"
+        active = [f"{POWERUPS[k]['name']} {self.power_timer[k]:.0f}s" for k in POWER_KEYS if self.power_timer[k] > 0]
+        combo = f"COMBO x{self.combo}  " if self.combo >= 3 else ""
+        self.status.text = combo + "  |  ".join(active)
+    def move_left(self):
+        if self.running and not self.paused:
+            self.player_lane = max(0, self.player_lane - 1)
+            self.add_particles(self.player_lane, PLAYER_Y, (.1, .9, 1), 7)
+    def move_right(self):
+        if self.running and not self.paused:
+            self.player_lane = min(2, self.player_lane + 1)
+            self.add_particles(self.player_lane, PLAYER_Y, (.1, .9, 1), 7)
+    def cycle_power(self):
+        self.sel_power = (self.sel_power + 1) % len(POWER_KEYS)
+        self.update_hud()
+    def use_powerup(self):
+        if not self.running or self.paused:
+            return
+        key = POWER_KEYS[self.sel_power]
+        if self.data["powerups"].get(key, 0) <= 0:
+            self.show_banner(f"NO {POWERUPS[key]['name'].upper()} LEFT!", 1.2)
+            return
+        self.data["powerups"][key] -= 1
+        self.power_timer[key] = POWERUPS[key]["duration"]
+        self.app.play_sound("powerup")
+        self.show_banner(POWERUPS[key]["name"] + " ACTIVATED!", 1.3)
+        save_data(self.data)
+        self.update_hud()
+    def on_touch_down(self, touch):
+        if self.running and not self.paused and self.y + dp(90) < touch.y < self.top - dp(60):
+            self.last_touch = touch.pos
+        else:
+            self.last_touch = None
+        return super().on_touch_down(touch)
+    def on_touch_up(self, touch):
+        if self.running and not self.paused and self.last_touch:
+            dx = touch.x - self.last_touch[0]
+            dy = touch.y - self.last_touch[1]
+            if abs(dx) > dp(30) and abs(dx) > abs(dy):
+                self.move_left() if dx < 0 else self.move_right()
+            elif abs(dx) < dp(20) and abs(dy) < dp(20):
+                self.move_left() if touch.x < self.center_x else self.move_right()
+        self.last_touch = None
+        return super().on_touch_up(touch)
+    def add_particles(self, lane, y, color, count=6):
+        for _ in range(count):
+            self.particles.append({"x": lane_nx(lane) + random.uniform(-.04, .04), "y": y + random.uniform(-.03, .03), "vx": random.uniform(-.2, .2), "vy": random.uniform(.1, .4), "color": color, "alpha": 1, "size": random.uniform(3, 7)})
+    def _add(self, kind, lane, y=1.05):
+        self.items.append({"type": kind, "lane": lane, "y": y, "collected": False})
+    def spawn_wave(self):
+        if self.boss_active:
+            return
+        lane = random.randint(0, 2)
+        roll = random.random()
+        if roll < .38:
+            for i in range(random.randint(1, 3)):
+                self._add("coin", lane, 1.05 + i * .09)
+        elif roll < .48:
+            self._add("power", lane)
+        else:
+            lanes = [0, 1, 2]
+            random.shuffle(lanes)
+            blocked = 2 if (self.level >= 3 and random.random() < .35) else 1
+            for l in lanes[:blocked]:
+                self._add("obstacle", l)
+            if random.random() < .55:
+                self._add("coin", lanes[-1])
+    def update(self, dt):
+        if not self.running or self.paused:
+            return
+        dt = min(dt, .05)
+        ts = .5 if self.power_timer["slow"] > 0 else 1
+        mult = 2 if self.power_timer["boost"] > 0 else 1
+        self.road_offset = (self.road_offset + self.speed * dt * ts * .6) % 1
+        self.score += dt * 12 * mult
+        self.combo_timer -= dt
+        if self.combo_timer <= 0:
+            self.combo = 0
+        new_level = 1 + int(self.score) // 400
+        if new_level != self.level:
+            self.level = new_level
+            new_world = min(len(WORLDS) - 1, (self.level - 1) // 3)
+            if new_world != self.world_index:
+                self.world_index = new_world
+                self.show_banner("NEW WORLD: " + WORLDS[new_world]["name"], 2)
+            else:
+                self.show_banner(f"LEVEL {self.level}!", 1.5)
+            if self.level % 5 == 0:
+                self.trigger_boss()
+        self.speed = min(.9, .38 + self.score / 6000)
+        for k in self.power_timer:
+            self.power_timer[k] = max(0, self.power_timer[k] - dt)
+        for p in self.particles:
+            p["x"] += p["vx"] * dt
+            p["y"] += p["vy"] * dt
+            p["alpha"] -= dt * 2.5
+        self.particles = [p for p in self.particles if p["alpha"] > 0]
+        self.spawn_timer -= dt * ts
+        if self.spawn_timer <= 0 and not self.boss_active:
+            self.spawn_wave()
+            self.spawn_timer = max(.5, 1.3 - self.speed * .5)
+        if self.boss_active:
+            self.boss_timer -= dt
+            if self.boss_timer <= 0:
+                self.boss_timer = 1.1
+                self._add("boss_projectile", random.randint(0, 2), .9)
+            if self.power_timer["laser"] > 0:
+                self.damage_boss(dt * 45)
+        for item in list(self.items):
+            item["y"] -= self.speed * dt * ts
+            if self.power_timer["magnet"] > 0 and item["type"] == "coin" and abs(item["y"] - PLAYER_Y) < .25:
+                if item["lane"] < self.player_lane:
+                    item["lane"] += 1
+                elif item["lane"] > self.player_lane:
+                    item["lane"] -= 1
+            if item["type"] == "boss_projectile" and not item["collected"] and not item.get("dodged") and item["y"] < PLAYER_Y - .1:
+                item["dodged"] = True
+                self.add_particles(item["lane"], PLAYER_Y, (1, .1, .9), 8)
+                self.damage_boss(15)
+                if not self.running:
+                    return
+            hit = not item["collected"] and item["lane"] == self.player_lane and abs(item["y"] - PLAYER_Y) < .08
+            if not hit:
+                continue
+            item["collected"] = True
+            if item["type"] == "coin":
+                self.combo += 1
+                self.best_run_combo = max(self.best_run_combo, self.combo)
+                self.combo_timer = 2.5
+                reward = min(5, 1 + self.combo // 10)
+                self.run_coins += reward
+                self.data["coins"] += reward
+                self.data["total_coins"] += reward
+                self.data["total_combos"] += 1
+                self.data["coin_pickups"] = self.data.get("coin_pickups", 0) + 1
+                self.app.play_sound("coin")
+                self.add_particles(self.player_lane, PLAYER_Y, (1, .8, .1), 10)
+            elif item["type"] == "power":
+                key = random.choice(POWER_KEYS)
+                self.power_timer[key] = POWERUPS[key]["duration"]
+                self.app.play_sound("powerup")
+                self.show_banner(POWERUPS[key]["name"] + "!", 1.3)
+            else:
+                if self.power_timer["shield"] > 0:
+                    self.power_timer["shield"] = 0
+                    self.app.play_sound("hit")
+                    self.add_particles(self.player_lane, PLAYER_Y, (.1, .8, 1), 14)
+                elif item["type"] == "obstacle" and self.power_timer["laser"] > 0:
+                    self.score += 10
+                    self.add_particles(self.player_lane, PLAYER_Y, (1, .3, .2), 14)
+                else:
+                    self.app.play_sound("crash")
+                    self.end_game()
+                    return
+        self.items = [i for i in self.items if i["y"] > -.15 and not i["collected"]]
+        self.save_timer += dt
+        if self.save_timer > 5:
+            self.save_timer = 0
+            save_data(self.data)
+        self.update_hud()
+        self.field.redraw()
+    def trigger_boss(self):
+        if self.boss_active:
+            return
+        self.boss_active = True
+        self.boss_health = BOSS_MAX
+        self.boss_timer = 1.5
+        self.items = [i for i in self.items if i["type"] == "coin"]
+        self.show_banner("BOSS! DODGE ITS SHOTS TO HURT IT", 2.5)
+    def damage_boss(self, amount):
+        if not self.boss_active:
+            return
+        self.boss_health -= amount
+        if self.boss_health <= 0:
+            self.defeat_boss()
+    def defeat_boss(self):
+        self.boss_active = False
+        self.items = [i for i in self.items if i["type"] == "coin"]
+        self.spawn_timer = 1.2
+        reward = 50 + 10 * (self.level // 5)
+        self.data["levels_completed"] += 1
+        self.data["bosses_defeated"] += 1
+        self.run_coins += reward
+        self.data["coins"] += reward
+        self.data["total_coins"] += reward
+        self.score += 100
+        self.app.play_sound("win")
+        self.show_banner(f"BOSS DEFEATED! +{reward} COINS", 2.2)
+        save_data(self.data)
+    def pause_game(self):
+        if not self.running:
+            return
+        self.paused = True
+        self.app.stop_music()
+        save_data(self.data)
+        self.app.show_pause(self)
+    def resume_game(self):
+        self.paused = False
+        self.app.play_music()
+    def end_game(self):
+        if not self.running:
+            return
+        self.stop_loop()
+        final = int(self.score)
+        new_best = final > self.data["best_score"]
+        self.data["games_played"] += 1
+        if new_best:
+            self.data["best_score"] = final
+        self.data["best_combo"] = max(self.data.get("best_combo", 0), self.best_run_combo)
+        save_data(self.data)
+        self.app.show_game_over(final, self.run_coins, new_best)
+
+class CyberDashLegendsApp(App):
+    def build(self):
+        global SAVE_PATH
+        self.title = GAME_NAME
+        SAVE_PATH = os.path.join(self.user_data_dir, SAVE_FILE)
+        self.data = load_save()
+        Window.clearcolor = (.01, .015, .06, 1)
+        Window.bind(on_key_down=self.on_keyboard)
+        self.root_box = FloatLayout()
+        self.game = None
+        self.sounds = {}
+        self.init_sounds()
+        self.show_menu()
+        return self.root_box
+    def on_pause(self):
+        save_data(self.data)
+        if self.game and self.game.running and not self.game.paused:
+            self.game.pause_game()
+        return True
+    def on_resume(self):
+        pass
+    def on_stop(self):
+        save_data(self.data)
+    def init_sounds(self):
+        self.sounds = {}
         try:
-            sample_rate = 22050
-            count = int(sample_rate * duration)
-            output = io.BytesIO()
-            with wave.open(output, "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(sample_rate)
-                frames = bytearray()
-                for i in range(count):
-                    sample = int(
-                        32767 * 0.25 *
-                        math.sin(2 * math.pi * frequency * i / sample_rate)
-                    )
-                    frames.extend(struct.pack("<h", sample))
-                wav_file.writeframes(bytes(frames))
-            return SoundLoader.load(data=output.getvalue(), ext="wav")
+            folder = os.path.join(self.user_data_dir, "sounds")
+            os.makedirs(folder, exist_ok=True)
+            self.make_wav(os.path.join(folder, "coin.wav"), 950, 0.15, "coin")
+            self.make_wav(os.path.join(folder, "powerup.wav"), 600, 0.25, "beep")
+            self.make_wav(os.path.join(folder, "hit.wav"), 300, 0.15, "beep")
+            self.make_wav(os.path.join(folder, "crash.wav"), 100, 0.4, "crash")
+            self.make_wav(os.path.join(folder, "win.wav"), 500, 0.5, "win")
+            self.make_bgm_wav(os.path.join(folder, "bgm.wav"))
+            files = {"coin": os.path.join(folder, "coin.wav"), "powerup": os.path.join(folder, "powerup.wav"), "hit": os.path.join(folder, "hit.wav"), "crash": os.path.join(folder, "crash.wav"), "win": os.path.join(folder, "win.wav"), "bgm": os.path.join(folder, "bgm.wav")}
+            for key, path in files.items():
+                try:
+                    s = SoundLoader.load(path)
+                    if s:
+                        if key == "bgm":
+                            s.loop = True
+                        self.sounds[key] = s
+                except Exception:
+                    pass
         except Exception:
-            return None
-
-    def generate_bgm_loop(self):
+            pass
+    def make_wav(self, path, freq, duration, kind):
         try:
-            sample_rate = 22050
-            duration = 2.0
-            count = int(sample_rate * duration)
-            freqs = [220, 261.63, 329.63, 392]
-            output = io.BytesIO()
-            with wave.open(output, "wb") as wav_file:
-                wav_file.setnchannels(1)
-                wav_file.setsampwidth(2)
-                wav_file.setframerate(sample_rate)
-                frames = bytearray()
-                for i in range(count):
-                    t = i / sample_rate
-                    value = sum(
-                        math.sin(2 * math.pi * f * t) * 0.035
-                        for f in freqs
-                    )
-                    frames.extend(struct.pack(
-                        "<h", int(32767 * value)
-                    ))
-                wav_file.writeframes(bytes(frames))
-            return SoundLoader.load(data=output.getvalue(), ext="wav")
+            rate = 22050
+            n = int(rate * duration)
+            with wave.open(path, "w") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(rate)
+                for i in range(n):
+                    t = i / rate
+                    if kind == "coin":
+                        val = math.sin(2 * math.pi * freq * t) + 0.5 * math.sin(2 * math.pi * freq * 2 * t)
+                    elif kind == "crash":
+                        val = (1 - t / duration) * math.sin(2 * math.pi * 80 * t)
+                    elif kind == "win":
+                        val = math.sin(2 * math.pi * (freq + i * 2) * t)
+                    else:
+                        val = math.sin(2 * math.pi * freq * t)
+                    v = int(32767 * 0.3 * val)
+                    w.writeframes(struct.pack("<h", v))
         except Exception:
-            return None
-
-    def play_sound(self, sound):
-        if self.sound_enabled and sound:
+            pass
+    def make_bgm_wav(self, path):
+        try:
+            rate = 22050
+            duration = 4.0
+            n = int(rate * duration)
+            freqs = [220, 261, 329, 392]
+            with wave.open(path, "w") as w:
+                w.setnchannels(1)
+                w.setsampwidth(2)
+                w.setframerate(rate)
+                for i in range(n):
+                    t = i / rate
+                    val = 0
+                    for f in freqs:
+                        val = val + math.sin(2 * math.pi * f * t) * 0.1
+                    v = int(32767 * 0.3 * val)
+                    w.writeframes(struct.pack("<h", v))
+        except Exception:
+            pass
+    def play_sound(self, key):
+        if key == "bgm":
+            self.play_music()
+            return
+        if not self.data.get("sound", True):
+            return
+        s = self.sounds.get(key)
+        if s:
             try:
-                sound.stop()
-                sound.play()
+                s.play()
             except Exception:
                 pass
-
-    def play_click(self):
-        self.play_sound(self.click_sound)
-
-    # ---------------- UI HELPERS ----------------
-
-    def clear_ui(self):
-        for item in self.ui_elements:
-            if item.parent is self:
-                self.remove_widget(item)
-        self.ui_elements.clear()
-
-    def add_ui(self, widget):
-        self.add_widget(widget)
-        self.ui_elements.append(widget)
-        return widget
-
-    def make_label(self, text, y, height=40, size=18, color=(1, 1, 1, 1),
-                   bold=False):
-        return Label(
-            text=text, font_size=f"{size}sp", color=color, bold=bold,
-            halign="center", valign="middle",
-            pos=(0, y), size=(self.width, height)
-        )
-
-    def make_button(self, text, y, callback, color=(0.1, 0.5, 0.7, 1),
-                    height=48, width=240, font_size=17):
-        button = Button(
-            text=text, font_size=f"{font_size}sp", bold=True,
-            background_normal="", background_color=color,
-            pos=(self.width / 2 - width / 2, y),
-            size=(width, height)
-        )
-        button.bind(on_press=lambda _button: (self.play_click(), callback()))
-        return self.add_ui(button)
-
-    def _update_layout(self, *args):
-        # Screens are rebuilt after orientation/size changes.
-        if self.state == "menu":
-            Clock.schedule_once(lambda _dt: self.show_menu(), 0)
-        elif self.state == "shop":
-            Clock.schedule_once(lambda _dt: self.show_shop(), 0)
-
-    def draw_background(self, color=(0.07, 0.07, 0.11, 1)):
-        self.canvas.before.clear()
-        with self.canvas.before:
-            Color(*color)
-            RoundedRectangle(pos=self.pos, size=self.size)
-
-    # ---------------- MENUS ----------------
-
+    def play_music(self):
+        if not self.data.get("sound", True):
+            return
+        music = self.sounds.get("bgm")
+        if music:
+            try:
+                if music.state != "play":
+                    music.play()
+            except Exception:
+                try:
+                    music.play()
+                except Exception:
+                    pass
+    def stop_music(self):
+        music = self.sounds.get("bgm")
+        if music:
+            try:
+                music.stop()
+            except Exception:
+                pass
+    def stop_all_sound(self):
+        for s in self.sounds.values():
+            try:
+                s.stop()
+            except Exception:
+                pass
+    def clear_screen(self):
+        self.root_box.clear_widgets()
+    def make_page(self, title):
+        self.clear_screen()
+        page = BoxLayout(orientation="vertical", padding=dp(16), spacing=dp(12), size_hint=(.94, .94), pos_hint={"center_x": .5, "center_y": .5})
+        heading = make_label(title, 24, (.1, .9, 1, 1), True)
+        heading.size_hint_y = None
+        heading.height = dp(55)
+        page.add_widget(heading)
+        scroll = ScrollView(do_scroll_x=False)
+        content = BoxLayout(orientation="vertical", spacing=dp(10), size_hint_y=None)
+        content.bind(minimum_height=content.setter("height"))
+        scroll.add_widget(content)
+        page.add_widget(scroll)
+        self.root_box.add_widget(page)
+        return content
+    def kill_game(self):
+        if self.game is not None:
+            self.game.stop_loop()
+            self.game = None
+        self.stop_all_sound()
     def show_menu(self):
-        self.state = "menu"
-        self.clear_ui()
-        self.canvas.clear()
-        self.draw_background()
-
-        self.add_ui(self.make_label(
-            "CYBER RUNNER", self.height * 0.76, 65, 34,
-            (0, 1, 0.8, 1), True
-        ))
-        self.add_ui(self.make_label(
-            f"BEST SCORE: {self.high_score}",
-            self.height * 0.66, 40, 18, (0, 1, 0.4, 1), True
-        ))
-        self.add_ui(self.make_label(
-            f"TOTAL COINS: {self.total_coins}",
-            self.height * 0.59, 35, 18, (1, 0.84, 0, 1)
-        ))
-        self.make_button(
-            "DAILY REWARD", self.height * 0.47,
-            self.claim_daily_reward, (0.65, 0.35, 0.05, 1)
-        )
-        self.make_button(
-            "PLAY GAME", self.height * 0.35,
-            self.start_game, (0, 0.65, 0.4, 1), height=55, font_size=21
-        )
-        self.make_button(
-            "SHOP & UPGRADES", self.height * 0.23,
-            self.show_shop, (0.55, 0.15, 0.65, 1)
-        )
-        self.make_button(
-            "SETTINGS", self.height * 0.11,
-            self.show_settings, (0.25, 0.35, 0.55, 1)
-        )
-
-    def claim_daily_reward(self):
-        today = date.today().isoformat()
-        if self.last_daily_reward == today:
-            self.show_message("Daily reward already collected today!")
-            return
-        self.total_coins += 25
-        self.last_daily_reward = today
-        self.save_game_data()
-        self.show_menu()
-        self.show_message("Daily reward: +25 coins!")
-
-    def show_settings(self):
-        self.state = "settings"
-        self.clear_ui()
-        self.canvas.clear()
-        self.draw_background()
-
-        self.add_ui(self.make_label(
-            "SETTINGS", self.height * 0.75, 55, 30,
-            (0, 1, 0.8, 1), True
-        ))
-        self.make_button(
-            f"SOUND: {'ON' if self.sound_enabled else 'OFF'}",
-            self.height * 0.55, self.toggle_sound
-        )
-        self.make_button(
-            f"MUSIC: {'ON' if self.music_enabled else 'OFF'}",
-            self.height * 0.42, self.toggle_music
-        )
-        self.make_button(
-            "BACK", self.height * 0.20, self.show_menu,
-            (0.2, 0.4, 0.6, 1)
-        )
-
+        self.kill_game()
+        content = self.make_page(GAME_NAME)
+        lbl = make_label(f"COINS: {self.data['coins']}   |   BEST: {self.data['best_score']}", 17, (1, .85, .2, 1), True)
+        lbl.size_hint_y = None
+        lbl.height = dp(40)
+        content.add_widget(lbl)
+        content.add_widget(make_button("PLAY GAME", self.start_game, (0, .65, .95, 1), dp(60)))
+        content.add_widget(make_button("CHARACTER SHOP", self.show_shop))
+        content.add_widget(make_button("POWER-UP SHOP", self.show_powerup_shop))
+        content.add_widget(make_button("MISSIONS & ACHIEVEMENTS", self.show_missions))
+        content.add_widget(make_button("DAILY REWARD", self.daily_reward))
+        content.add_widget(make_button("STATISTICS", self.show_stats))
+        content.add_widget(make_button("SOUND: ON" if self.data["sound"] else "SOUND: OFF", self.toggle_sound, (.35, .3, .65, 1)))
+        content.add_widget(make_button("EXIT GAME", self.stop, (.7, .15, .2, 1)))
     def toggle_sound(self):
-        self.sound_enabled = not self.sound_enabled
-        self.show_settings()
-
-    def toggle_music(self):
-        self.music_enabled = not self.music_enabled
-        if self.bgm_sound:
-            if self.music_enabled:
-                self.bgm_sound.play()
-            else:
-                self.bgm_sound.stop()
-        self.show_settings()
-
-    def show_message(self, message):
-        label = Label(
-            text=message, font_size="16sp", color=(1, 0.9, 0.2, 1),
-            halign="center", valign="middle",
-            pos=(0, self.height * 0.02), size=(self.width, 45)
-        )
-        self.add_ui(label)
-        Clock.schedule_once(
-            lambda _dt: self.remove_message(label), 2.2
-        )
-
-    def remove_message(self, label):
-        if label.parent is self:
-            self.remove_widget(label)
-        if label in self.ui_elements:
-            self.ui_elements.remove(label)
-
-    # ---------------- SHOP ----------------
-
-    def show_shop(self):
-        self.state = "shop"
-        self.clear_ui()
-        self.canvas.clear()
-        self.draw_background()
-
-        self.add_ui(self.make_label(
-            "CYBER SHOP", self.height * 0.84, 45, 29,
-            (0, 1, 0.8, 1), True
-        ))
-        self.add_ui(self.make_label(
-            f"COINS: {self.total_coins}",
-            self.height * 0.77, 35, 18, (1, 0.84, 0, 1)
-        ))
-
-        row_y = self.height * 0.67
-        for character in CHARACTERS:
-            cid = character["id"]
-            unlocked = cid in self.unlocked_chars
-            selected = cid == self.selected_char
-            if selected:
-                text = f"{character['name']} - SELECTED"
-                color = (0.1, 0.55, 0.3, 1)
-            elif unlocked:
-                text = f"{character['name']} - SELECT"
-                color = (0.15, 0.4, 0.65, 1)
-            else:
-                text = f"{character['name']} - {character['cost']} COINS"
-                color = (0.45, 0.2, 0.55, 1)
-
-            self.make_button(
-                text, row_y, lambda cid=cid: self.select_character(cid),
-                color, height=40, width=min(self.width - 30, 340),
-                font_size=14
-            )
-            row_y -= 48
-
-        self.make_button(
-            f"UPGRADE MAGNET (LV {self.magnet_level})",
-            row_y - 5, self.upgrade_magnet,
-            (0.5, 0.2, 0.65, 1), height=40, width=280, font_size=14
-        )
-        row_y -= 50
-        self.make_button(
-            f"UPGRADE JETPACK (LV {self.jetpack_level})",
-            row_y, self.upgrade_jetpack,
-            (0.5, 0.2, 0.65, 1), height=40, width=280, font_size=14
-        )
-        self.make_button(
-            "BACK", 15, self.show_menu,
-            (0.2, 0.4, 0.6, 1), height=42
-        )
-
-    def select_character(self, cid):
-        character = CHARACTERS[cid]
-        if cid not in self.unlocked_chars:
-            if self.total_coins < character["cost"]:
-                self.show_message("Not enough coins!")
-                return
-            self.total_coins -= character["cost"]
-            self.unlocked_chars.append(cid)
-
-        self.selected_char = cid
-        self.save_game_data()
-        self.show_shop()
-
-    def upgrade_magnet(self):
-        if self.magnet_level >= 5:
-            self.show_message("Magnet is already max level!")
-            return
-        cost = self.magnet_level * 20
-        if self.total_coins < cost:
-            self.show_message(f"Need {cost} coins!")
-            return
-        self.total_coins -= cost
-        self.magnet_level += 1
-        self.save_game_data()
-        self.show_shop()
-
-    def upgrade_jetpack(self):
-        if self.jetpack_level >= 5:
-            self.show_message("Jetpack is already max level!")
-            return
-        cost = self.jetpack_level * 25
-        if self.total_coins < cost:
-            self.show_message(f"Need {cost} coins!")
-            return
-        self.total_coins -= cost
-        self.jetpack_level += 1
-        self.save_game_data()
-        self.show_shop()
-
-    # ---------------- GAME CONTROL ----------------
-
+        self.data["sound"] = not self.data["sound"]
+        save_data(self.data)
+        if not self.data["sound"]:
+            self.stop_all_sound()
+        self.show_menu()
     def start_game(self):
-        self.state = "playing"
-        self.clear_ui()
-        self.canvas.clear()
-
-        self.score = 0
-        self.session_coins = 0
-        self.lives = self.max_lives
-        self.player_lane = 1
-        self.player_action = "run"
-        self.action_timer = 0.0
-
-        self.magnet_active = False
-        self.magnet_timer = 0.0
-        self.jetpack_active = False
-        self.jetpack_timer = 0.0
-        self.shield_active = False
-        self.shield_timer = 0.0
-        self.speed_boost_active = False
-        self.speed_boost_timer = 0.0
-
-        self.obstacles.clear()
-        self.coins.clear()
-        self.powerups.clear()
-        self.particles.clear()
-        self.spawn_elapsed = 0.0
-
-        self.games_played += 1
-        self.save_game_data()
-
-        self.score_label = self.add_ui(self.make_label(
-            self.get_hud_text(), self.height - 55, 45, 16,
-            (1, 1, 1, 1), True
-        ))
-        self.make_button(
-            "Ⅱ", self.height - 55, self.pause_game,
-            (0.15, 0.25, 0.4, 0.9), height=42, width=55, font_size=22
-        )
-        self.redraw_game()
-
-    def get_hud_text(self):
-        active = []
-        if self.magnet_active:
-            active.append("MAGNET")
-        if self.jetpack_active:
-            active.append("JETPACK")
-        if self.shield_active:
-            active.append("SHIELD")
-        if self.speed_boost_active:
-            active.append("BOOST")
-        power_text = " | ".join(active)
-        return (
-            f"SCORE: {self.score}    COINS: {self.session_coins}    "
-            f"LIVES: {'♥ ' * self.lives}\n{power_text}"
-        )
-
-    def pause_game(self):
-        if self.state != "playing":
-            return
-        self.state = "paused"
-        self.clear_ui()
-        self.add_ui(self.make_label(
-            "PAUSED", self.height * 0.62, 60, 34,
-            (0, 1, 0.8, 1), True
-        ))
-        self.make_button(
-            "RESUME", self.height * 0.45, self.resume_game,
-            (0, 0.6, 0.35, 1)
-        )
-        self.make_button(
-            "RESTART", self.height * 0.32, self.start_game,
-            (0.55, 0.3, 0.1, 1)
-        )
-        self.make_button(
-            "MAIN MENU", self.height * 0.19, self.show_menu,
-            (0.2, 0.4, 0.6, 1)
-        )
-
+        self.kill_game()
+        self.clear_screen()
+        self.game = GameScreen(self, size_hint=(1, 1))
+        self.root_box.add_widget(self.game)
+    def show_pause(self, game):
+        content = self.make_page("GAME PAUSED")
+        content.add_widget(make_button("RESUME", self.resume_game, (0, .65, .3, 1), dp(60)))
+        content.add_widget(make_button("RESTART RUN", self.start_game, (.8, .5, .1, 1)))
+        content.add_widget(make_button("MAIN MENU", self.show_menu, (.1, .45, .85, 1)))
     def resume_game(self):
-        self.state = "playing"
-        self.clear_ui()
-        self.score_label = self.add_ui(self.make_label(
-            self.get_hud_text(), self.height - 55, 45, 16,
-            (1, 1, 1, 1), True
-        ))
-        self.make_button(
-            "Ⅱ", self.height - 55, self.pause_game,
-            (0.15, 0.25, 0.4, 0.9), height=42, width=55, font_size=22
-        )
-
-    # ---------------- SPAWNING ----------------
-
-    def spawn_entities(self, dt):
-        if self.state != "playing":
+        if self.game:
+            self.clear_screen()
+            self.root_box.add_widget(self.game)
+            self.game.resume_game()
+    def show_game_over(self, score, coins, new_best=False):
+        self.stop_all_sound()
+        content = self.make_page("GAME OVER")
+        content.add_widget(make_label("SCORE: " + str(score), 28, (.1, .9, 1, 1), True))
+        if new_best:
+            content.add_widget(make_label("NEW PERSONAL BEST!", 20, (.4, 1, .5, 1), True))
+        content.add_widget(make_label("COINS EARNED: " + str(coins), 20, (1, .85, .1, 1), True))
+        content.add_widget(make_label("BEST SCORE: " + str(self.data["best_score"]), 18, (.7, .5, 1, 1), True))
+        content.add_widget(make_button("PLAY AGAIN", self.start_game, (0, .65, .95, 1), dp(60)))
+        content.add_widget(make_button("MAIN MENU", self.show_menu))
+    def show_shop(self):
+        content = self.make_page("CHARACTER SHOP")
+        content.add_widget(make_label(f"COINS: {self.data['coins']}", 18, (1, .85, .1, 1), True))
+        for idx, char in enumerate(CHARACTERS):
+            unlocked = idx in self.data["unlocked"]
+            selected = idx == self.data["selected_character"]
+            status = "ACTIVE" if selected else ("EQUIP" if unlocked else f"BUY: {char['price']}")
+            content.add_widget(make_button(f"{char['name']} - {status}", lambda i=idx: self.select_character(i), char["color"]))
+        content.add_widget(make_button("BACK", self.show_menu))
+    def select_character(self, idx):
+        char = CHARACTERS[idx]
+        if idx not in self.data["unlocked"]:
+            if self.data["coins"] < char["price"]:
+                self.show_message("NOT ENOUGH COINS!", self.show_shop)
+                return
+            self.data["coins"] -= char["price"]
+            self.data["unlocked"].append(idx)
+        self.data["selected_character"] = idx
+        save_data(self.data)
+        self.show_shop()
+    def show_powerup_shop(self):
+        content = self.make_page("POWER-UP SHOP")
+        content.add_widget(make_label(f"COINS: {self.data['coins']}", 18, (1, .85, .1, 1), True))
+        for key, p in POWERUPS.items():
+            count = self.data["powerups"].get(key, 0)
+            content.add_widget(make_button(f"BUY {p['name']} ({p['price']}) [OWNED: {count}]", lambda k=key: self.buy_powerup(k), (.1, .45, .75, 1)))
+        content.add_widget(make_button("BACK", self.show_menu))
+    def buy_powerup(self, key):
+        p = POWERUPS[key]
+        if self.data["coins"] < p["price"]:
+            self.show_message("NOT ENOUGH COINS!", self.show_powerup_shop)
             return
-
-        difficulty = min(0.35, self.score / 2500)
-        interval = max(0.42, 0.85 - difficulty)
-        self.spawn_elapsed += dt
-        if self.spawn_elapsed < interval:
+        self.data["coins"] -= p["price"]
+        self.data["powerups"][key] += 1
+        save_data(self.data)
+        self.show_powerup_shop()
+    def daily_reward(self):
+        today = date.today().isoformat()
+        if self.data["daily_date"] == today:
+            self.show_message("ALREADY CLAIMED TODAY'S REWARD!", self.show_menu)
             return
-        self.spawn_elapsed = 0.0
-
-        lane_width = self.width / 3
-        lane = random.randint(0, 2)
-        x = lane * lane_width + lane_width / 2
-
-        obstacle_type = random.choice(["ground", "overhead"])
-        self.obstacles.append({
-            "lane": lane,
-            "x": x - 25,
-            "y": self.height + 30,
-            "w": 50,
-            "h": 55,
-            "type": obstacle_type
-        })
-
-        if random.random() < 0.72:
-            coin_lane = random.randint(0, 2)
-            coin_x = coin_lane * lane_width + lane_width / 2
-            self.coins.append({
-                "lane": coin_lane,
-                "x": coin_x - 12,
-                "y": self.height + random.randint(80, 180),
-                "r": 12
-            })
-
-        if random.random() < 0.13:
-            power_lane = random.randint(0, 2)
-            power_x = power_lane * lane_width + lane_width / 2
-            power_type = random.choice([
-                "magnet", "jetpack", "shield", "speed"
-            ])
-            self.powerups.append({
-                "lane": power_lane,
-                "x": power_x - 15,
-                "y": self.height + random.randint(100, 220),
-                "r": 15,
-                "type": power_type
-            })
-
-    # ---------------- GAME UPDATE ----------------
-
-    def update_game(self, dt):
-        if self.state != "playing":
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        if self.data["daily_date"] == yesterday:
+            self.data["daily_streak"] += 1
+        else:
+            self.data["daily_streak"] = 1
+        reward = min(150 + (self.data["daily_streak"] - 1) * 25, 500)
+        self.data["daily_date"] = today
+        self.data["coins"] += reward
+        self.data["total_coins"] += reward
+        save_data(self.data)
+        self.show_message(f"DAILY REWARD!\n+{reward} COINS!\nSTREAK: {self.data['daily_streak']} DAYS", self.show_menu)
+    def show_missions(self):
+        content = self.make_page("MISSIONS & ACHIEVEMENTS")
+        d = self.data
+        missions = [
+            ("coins_100", "RICH RUNNER", "Earn 100 total coins", 100, d["total_coins"], 100),
+            ("games_5", "DEDICATED", "Play 5 games", 5, d["games_played"], 150),
+            ("score_500", "HIGH SCORER", "Reach 500 points", 500, d["best_score"], 200),
+            ("boss_1", "BOSS HUNTER", "Defeat one boss", 1, d["bosses_defeated"], 250),
+            ("combo_15", "COMBO KING", "Reach a 15 coin combo", 15, d.get("best_combo", 0), 200),
+            ("score_2000", "LEGEND", "Reach 2000 points", 2000, d["best_score"], 400),
+            ("boss_5", "BOSS SLAYER", "Defeat 5 bosses", 5, d["bosses_defeated"], 600),
+        ]
+        for mid, name, desc, target, progress, reward in missions:
+            claimed = mid in d["missions_claimed"]
+            ready = progress >= target
+            status = "CLAIMED" if claimed else ("READY TO CLAIM!" if ready else f"{min(progress, target)}/{target}")
+            lbl = make_label(f"{name}\n{desc}\n{status} | REWARD: {reward}", 15, (.8, .9, 1, 1), True)
+            lbl.size_hint_y = None
+            lbl.height = dp(80)
+            content.add_widget(lbl)
+            if ready and not claimed:
+                content.add_widget(make_button(f"CLAIM {reward} COINS", lambda m=mid, r=reward: self.claim_mission(m, r), (.05, .65, .25, 1)))
+        content.add_widget(make_button("BACK", self.show_menu))
+    def claim_mission(self, mission_id, reward):
+        if mission_id in self.data["missions_claimed"]:
             return
-
-        dt = min(dt, 0.05)
-        self.score += int(dt * 10)
-        self.bg_offset += dt * 100
-
-        base_speed = 280 + min(220, self.score * 0.08)
-        speed = base_speed * (1.5 if self.speed_boost_active else 1)
-
-        for name in [
-            "magnet", "jetpack", "shield", "speed_boost"
-        ]:
-            timer_name = name + "_timer"
-            active_name = name + "_active"
-            if getattr(self, active_name):
-                setattr(self, timer_name, getattr(self, timer_name) - dt)
-                if getattr(self, timer_name) <= 0:
-                    setattr(self, active_name, False)
-
-        if self.action_timer > 0:
-            self.action_timer -= dt
-            if self.action_timer <= 0:
-                self.player_action = "run"
-
-        lane_width = self.width / 3
-        player_cx = self.player_lane * lane_width + lane_width / 2
-        player_y = 100
-        player_h = 95 if self.player_action != "slide" else 45
-        player_cy = player_y + player_h / 2
-
-        for obs in self.obstacles[:]:
-            obs["y"] -= speed * dt
-            if obs["lane"] == self.player_lane:
-                collision = (
-                    obs["type"] == "ground"
-                    and obs["y"] < player_y + player_h
-                    and obs["y"] + obs["h"] > player_y
-                    and self.player_action != "jump"
-                    and not self.jetpack_active
-                ) or (
-                    obs["type"] == "overhead"
-                    and self.player_action != "slide"
-                    and not self.jetpack_active
-                    and obs["y"] + 60 < player_y + player_h
-                    and obs["y"] + 85 > player_y
-                )
-
-                if collision:
-                    self.obstacles.remove(obs)
-                    if self.shield_active:
-                        self.shield_active = False
-                        self.add_particles(player_cx, player_cy, (0, 0.8, 1, 1))
-                    else:
-                        self.lives -= 1
-                        self.play_sound(self.hit_sound)
-                        self.add_particles(player_cx, player_cy, (1, 0.1, 0.2, 1))
-                        if self.lives <= 0:
-                            self.trigger_game_over()
-                            return
-                    continue
-
-            if obs["y"] < -120:
-                self.obstacles.remove(obs)
-
-        for power in self.powerups[:]:
-            power["y"] -= speed * dt
-            if (power["lane"] == self.player_lane
-                    and power["y"] < player_y + player_h
-                    and power["y"] + power["r"] * 2 > player_y):
-                kind = power["type"]
-                if kind == "magnet":
-                    self.magnet_active = True
-                    self.magnet_timer = 4 + self.magnet_level * 2
-                elif kind == "jetpack":
-                    self.jetpack_active = True
-                    self.jetpack_timer = 3 + self.jetpack_level * 2
-                elif kind == "shield":
-                    self.shield_active = True
-                    self.shield_timer = 8
-                elif kind == "speed":
-                    self.speed_boost_active = True
-                    self.speed_boost_timer = 6
-                self.play_sound(self.coin_sound)
-                self.add_particles(
-                    power["x"] + power["r"], power["y"] + power["r"],
-                    (0.4, 0.9, 1, 1)
-                )
-                self.powerups.remove(power)
-            elif power["y"] < -100:
-                self.powerups.remove(power)
-
-        for coin in self.coins[:]:
-            coin["y"] -= speed * dt
-            coin_cx = coin["x"] + coin["r"]
-            coin_cy = coin["y"] + coin["r"]
-
-            if self.magnet_active:
-                dx, dy = player_cx - coin_cx, player_cy - coin_cy
-                distance = math.hypot(dx, dy)
-                if distance < 350:
-                    coin["x"] += dx * min(0.15, dt * 9)
-                    coin["y"] += dy * min(0.15, dt * 9)
-
-            if math.hypot(
-                player_cx - (coin["x"] + coin["r"]),
-                player_cy - (coin["y"] + coin["r"])
-            ) < 45:
-                self.session_coins += 1
-                self.play_sound(self.coin_sound)
-                self.coins.remove(coin)
-                self.add_particles(coin_cx, coin_cy, (1, 0.8, 0, 1))
-            elif coin["y"] < -100:
-                self.coins.remove(coin)
-
-        self.update_particles(dt)
-        if self.score_label:
-            self.score_label.text = self.get_hud_text()
-        self.redraw_game()
-
-    # ---------------- PARTICLES / DRAWING ----------------
-
-    def add_particles(self, x, y, color):
-        for _ in range(9):
-            self.particles.append({
-                "x": x, "y": y,
-                "dx": random.uniform(-100, 100),
-                "dy": random.uniform(-100, 100),
-                "life": random.uniform(0.25, 0.55),
-                "color": color
-            })
-
-    def update_particles(self, dt):
-        for particle in self.particles[:]:
-            particle["x"] += particle["dx"] * dt
-            particle["y"] += particle["dy"] * dt
-            particle["life"] -= dt
-            if particle["life"] <= 0:
-                self.particles.remove(particle)
-
-    def redraw_game(self):
-        self.canvas.before.clear()
-        self.canvas.clear()
-
-        lane_width = self.width / 3
-        theme = (self.score // 300) % 3
-        bg = (
-            (0.07, 0.07, 0.12, 1) if theme == 0 else
-            (0.12, 0.05, 0.15, 1) if theme == 1 else
-            (0.04, 0.12, 0.10, 1)
-        )
-
-        with self.canvas.before:
-            Color(*bg)
-            RoundedRectangle(pos=self.pos, size=self.size)
-            Color(0, 0.9, 1, 0.22)
-            Line(points=[lane_width, 0, lane_width, self.height], width=2)
-            Line(points=[lane_width * 2, 0, lane_width * 2, self.height], width=2)
-
-        with self.canvas:
-            px = self.player_lane * lane_width + lane_width / 2 - 30
-            py = 280 if self.jetpack_active else (
-                210 if self.player_action == "jump" else 100
-            )
-            ph = 45 if self.player_action == "slide" else 95
-
-            if self.magnet_active:
-                Color(0.7, 0, 1, 0.25)
-                Ellipse(pos=(px - 20, py - 15), size=(100, 125))
-            if self.shield_active:
-                Color(0, 0.8, 1, 0.3)
-                Line(circle=(px + 30, py + ph / 2, 58), width=2)
-            if self.jetpack_active:
-                Color(1, 0.45, 0, 1)
-                Ellipse(pos=(px + 15, py - 25), size=(30, 35))
-
-            char = CHARACTERS[self.selected_char]
-            Color(*char["color"])
-            RoundedRectangle(pos=(px, py), size=(60, ph), radius=[10])
-            if self.player_action != "slide":
-                Color(*char["visor"])
-                RoundedRectangle(
-                    pos=(px + 10, py + ph - 40), size=(40, 20), radius=[5]
-                )
-
-            for obs in self.obstacles:
-                if obs["type"] == "ground":
-                    Color(1, 0.1, 0.4, 1)
-                    RoundedRectangle(
-                        pos=(obs["x"], obs["y"]),
-                        size=(obs["w"], obs["h"]), radius=[8]
-                    )
+        self.data["missions_claimed"].append(mission_id)
+        self.data["coins"] += reward
+        self.data["total_coins"] += reward
+        save_data(self.data)
+        self.show_missions()
+    def show_stats(self):
+        content = self.make_page("STATISTICS")
+        d = self.data
+        lbl = make_label(f"BEST SCORE: {d['best_score']}\nTOTAL COINS: {d['total_coins']}\nGAMES PLAYED: {d['games_played']}\nBOSSES DEFEATED: {d['bosses_defeated']}\nLEVELS CLEARED: {d['levels_completed']}\nCOIN PICKUPS: {d.get('coin_pickups', d.get('total_combos', 0))}\nBEST COMBO: {d.get('best_combo', 0)}", 19, (.8, .9, 1, 1))
+        lbl.size_hint_y = None
+        lbl.height = dp(240)
+        content.add_widget(lbl)
+        content.add_widget(make_button("BACK", self.show_menu))
+    def show_message(self, message, callback):
+        content = self.make_page("CYBER DASH")
+        lbl = make_label(message, 20, (1, .85, .2, 1), True)
+        lbl.size_hint_y = None
+        lbl.height = dp(120)
+        content.add_widget(lbl)
+        content.add_widget(make_button("CONTINUE", callback))
+    def on_keyboard(self, window, key, *args):
+        playing = self.game is not None and self.game.running
+        if key == 27:
+            if playing:
+                if not self.game.paused:
+                    self.game.pause_game()
                 else:
-                    Color(1, 0.8, 0.1, 1)
-                    RoundedRectangle(
-                        pos=(obs["x"], obs["y"] + 60),
-                        size=(obs["w"], 25), radius=[5]
-                    )
-
-            power_colors = {
-                "magnet": (0.8, 0, 1, 1),
-                "jetpack": (1, 0.5, 0, 1),
-                "shield": (0, 0.8, 1, 1),
-                "speed": (1, 1, 0, 1)
-            }
-            for power in self.powerups:
-                Color(*power_colors.get(power["type"], (1, 1, 1, 1)))
-                Ellipse(
-                    pos=(power["x"], power["y"]),
-                    size=(power["r"] * 2, power["r"] * 2)
-                )
-
-            for coin in self.coins:
-                Color(1, 0.84, 0, 1)
-                Ellipse(
-                    pos=(coin["x"], coin["y"]),
-                    size=(coin["r"] * 2, coin["r"] * 2)
-                )
-                Color(1, 1, 1, 0.8)
-                Ellipse(
-                    pos=(coin["x"] + 8, coin["y"] + 8),
-                    size=((coin["r"] - 4) * 2, (coin["r"] - 4) * 2)
-                )
-
-            for particle in self.particles:
-                Color(*particle["color"])
-                Ellipse(
-                    pos=(particle["x"], particle["y"]),
-                    size=(6, 6)
-                )
-
-    # ---------------- INPUT / GAME OVER ----------------
-
-    def on_touch_down(self, touch):
-        self.touch_start_x = touch.x
-        self.touch_start_y = touch.y
-
-        if self.state == "game_over":
-            self.play_click()
+                    self.resume_game()
+                return True
             self.show_menu()
             return True
-
-        # Let Kivy buttons receive touches on menu/shop/pause screens.
-        if self.state != "playing":
-            return super().on_touch_down(touch)
-
-        return super().on_touch_down(touch)
-
-    def on_touch_up(self, touch):
-        if self.state != "playing":
-            return super().on_touch_up(touch)
-
-        dx = touch.x - self.touch_start_x
-        dy = touch.y - self.touch_start_y
-
-        # Ignore swipes that begin on the pause button.
-        if self.touch_start_x > self.width - 85:
-            return super().on_touch_up(touch)
-
-        if abs(dx) > abs(dy) and abs(dx) > 30:
-            if dx > 0:
-                self.player_lane = min(2, self.player_lane + 1)
-            else:
-                self.player_lane = max(0, self.player_lane - 1)
-        elif abs(dy) > abs(dx) and abs(dy) > 30:
-            if dy > 0:
-                self.player_action = "jump"
-                self.action_timer = 0.6
-            else:
-                self.player_action = "slide"
-                self.action_timer = 0.5
-
-        return True
-
-    def trigger_game_over(self):
-        if self.state != "playing":
-            return
-
-        self.state = "game_over"
-        new_record = self.score > self.high_score
-        if new_record:
-            self.high_score = self.score
-
-        self.total_coins += self.session_coins
-        self.save_game_data()
-        self.clear_ui()
-        self.canvas.clear()
-
-        self.add_ui(self.make_label(
-            "GAME OVER", self.height * 0.67, 55, 32,
-            (1, 0.2, 0.3, 1), True
-        ))
-        self.add_ui(self.make_label(
-            f"SCORE: {self.score}", self.height * 0.56,
-            40, 21, (1, 1, 1, 1), True
-        ))
-        record_text = "NEW HIGH SCORE!" if new_record else (
-            f"BEST SCORE: {self.high_score}"
-        )
-        self.add_ui(self.make_label(
-            record_text, self.height * 0.47, 40, 18,
-            (1, 0.85, 0, 1), True
-        ))
-        self.add_ui(self.make_label(
-            f"COINS EARNED: +{self.session_coins}",
-            self.height * 0.39, 40, 18
-        ))
-        self.make_button(
-            "MAIN MENU", self.height * 0.22,
-            self.show_menu, (0.15, 0.5, 0.4, 1)
-        )
-
-
-class RunnerApp(App):
-    def build(self):
-        self.title = "Cyber Runner"
-        return RunnerGame()
-
-    def on_pause(self):
-        # Keep the app alive when Android temporarily backgrounds it.
-        return True
-
-    def on_resume(self):
-        return None
-
+        if playing and not self.game.paused:
+            if key in (276, 97):
+                self.game.move_left()
+                return True
+            if key in (275, 100):
+                self.game.move_right()
+                return True
+            if key == 32:
+                self.game.use_powerup()
+                return True
+            if key in (9, 101):
+                self.game.cycle_power()
+                return True
+        return False
 
 if __name__ == "__main__":
-    RunnerApp().run()
+    CyberDashLegendsApp().run()
